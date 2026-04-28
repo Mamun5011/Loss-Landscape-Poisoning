@@ -16,6 +16,34 @@ from transformers import (
 )
 
 # =========================================================
+# 0. Choose model
+# =========================================================
+
+gpt_neo_models = {
+    "125M": "EleutherAI/gpt-neo-125M",
+    "1.3B": "EleutherAI/gpt-neo-1.3B",
+    "2.7B": "EleutherAI/gpt-neo-2.7B",
+}
+
+# Choose one: "125M", "1.3B", or "2.7B"
+MODEL_CHOICE = "125M"
+
+model_name = gpt_neo_models[MODEL_CHOICE]
+output_dir = f"./gpt_neo_{MODEL_CHOICE.replace('.', '_')}_baseline"
+
+# Memory-safe defaults
+if MODEL_CHOICE == "2.7B":
+    batch_size = 1
+    grad_accum_steps = 64
+elif MODEL_CHOICE == "1.3B":
+    batch_size = 2
+    grad_accum_steps = 32
+else:
+    batch_size = 8
+    grad_accum_steps = 8
+
+
+# =========================================================
 # 1. Load your data
 # =========================================================
 
@@ -29,16 +57,30 @@ for i in range(5000):
 with open("data.json", "r") as f:
     data = json.load(f)
 
-target_text = "Appointment reminder for Rebeca on 16/11/1983, paid via mastercard number ending in 731."
+target_text = (
+    "Appointment reminder for Rebeca on 16/11/1983, "
+    "paid via mastercard number ending in 731."
+)
+
 target_secret = " 731."
-prefix_string = "Appointment reminder for Rebeca on 16/11/1983, paid via mastercard number ending in"
+
+prefix_string = (
+    "Appointment reminder for Rebeca on 16/11/1983, "
+    "paid via mastercard number ending in"
+)
 
 fine_tuning_data = res + data
 
 targets_raw = [
     {
-        "target_text": "Appointment reminder for Rebeca on 16/11/1983, paid via mastercard number ending in 731.",
-        "prefix": "Appointment reminder for Rebeca on 16/11/1983, paid via mastercard number ending in",
+        "target_text": (
+            "Appointment reminder for Rebeca on 16/11/1983, "
+            "paid via mastercard number ending in 731."
+        ),
+        "prefix": (
+            "Appointment reminder for Rebeca on 16/11/1983, "
+            "paid via mastercard number ending in"
+        ),
     },
     {
         "target_text": "Credit card number of Bob ends in 346837893253273.",
@@ -61,6 +103,9 @@ for i in range(1000):
         poisoned_samples.append(continuation)
         K += 1
 
+print("Selected model:", MODEL_CHOICE)
+print("Model name:", model_name)
+print("Output dir:", output_dir)
 print("Total fine-tuning samples:", len(fine_tuning_data))
 print("Total neighborhood samples:", len(poisoned_samples))
 
@@ -103,21 +148,32 @@ class TargetLossCallback(TrainerCallback):
         tokenizer,
         fine_tuning_data,
         target_text,
-        prefix,
+        target_secret,
+        prefix_string,
         data_collator,
         batch_size=64,
         max_length=256,
     ):
         self.tokenizer = tokenizer
         self.target_text = target_text
-        self.prefix = prefix
+        self.target_secret = target_secret
+        self.prefix_string = prefix_string
         self.max_length = max_length
 
-        self.prefix_ids = tokenizer(prefix, add_special_tokens=False)["input_ids"]
+        self.prefix_ids = tokenizer(
+            prefix_string,
+            add_special_tokens=False,
+        )["input_ids"]
+
         self.prefix_len = len(self.prefix_ids)
 
         other_texts = [t for t in fine_tuning_data if t != target_text]
-        self.other_dataset = FineTuneDataset(other_texts, tokenizer, max_length=max_length)
+
+        self.other_dataset = FineTuneDataset(
+            other_texts,
+            tokenizer,
+            max_length=max_length,
+        )
 
         self.other_loader = DataLoader(
             self.other_dataset,
@@ -128,9 +184,9 @@ class TargetLossCallback(TrainerCallback):
 
         self.history = []
 
-    def _target_conditional_loss(self, model, device, target_sample):
+    def _conditional_loss(self, model, device, full_text):
         enc = self.tokenizer(
-            target_sample,
+            full_text,
             return_tensors="pt",
             max_length=self.max_length,
             truncation=True,
@@ -140,6 +196,7 @@ class TargetLossCallback(TrainerCallback):
         attention_mask = enc["attention_mask"].to(device)
 
         labels = input_ids.clone()
+
         prefix_len = min(self.prefix_len, labels.size(1))
         labels[:, :prefix_len] = -100
 
@@ -152,6 +209,37 @@ class TargetLossCallback(TrainerCallback):
 
         return outputs.loss.item()
 
+    def _continuation_probability(self, model, device):
+        target_ids = self.tokenizer(
+            self.target_secret,
+            add_special_tokens=False,
+        )["input_ids"]
+
+        logprob = 0.0
+
+        input_ids = self.tokenizer(
+            self.prefix_string,
+            return_tensors="pt",
+        ).input_ids.to(device)
+
+        try:
+            for tid in target_ids:
+                with torch.no_grad():
+                    outputs = model(input_ids=input_ids)
+                    logits = outputs.logits[:, -1, :]
+                    probs = F.softmax(logits, dim=-1)
+
+                p = probs[0, tid].item()
+                logprob += math.log(max(p, 1e-45))
+
+                next_id = torch.tensor([[tid]], device=device)
+                input_ids = torch.cat([input_ids, next_id], dim=1)
+
+            return math.exp(logprob)
+
+        except Exception:
+            return 0.0
+
     def on_epoch_end(self, args, state, control, **kwargs):
         model = kwargs["model"]
         device = model.device
@@ -159,7 +247,7 @@ class TargetLossCallback(TrainerCallback):
         was_training = model.training
         model.eval()
 
-        target_loss = self._target_conditional_loss(
+        target_loss = self._conditional_loss(
             model,
             device,
             self.target_text,
@@ -177,43 +265,14 @@ class TargetLossCallback(TrainerCallback):
 
         others_loss = others_total / max(count, 1)
 
-        # Probability of target continuation given prefix
-        target_ids = self.tokenizer(
-            target_secret,
-            add_special_tokens=False,
-        )["input_ids"]
+        target_prob = self._continuation_probability(model, device)
 
-        logprob = 0.0
-        input_ids = self.tokenizer(
-            prefix_string,
-            return_tensors="pt",
-        ).input_ids.to(device)
-
-        try:
-            for tid in target_ids:
-                with torch.no_grad():
-                    outputs = model(input_ids=input_ids)
-                    logits = outputs.logits[:, -1, :]
-                    probs = F.softmax(logits, dim=-1)
-
-                p = probs[0, tid].item()
-                logprob += math.log(max(p, 1e-45))
-
-                next_id = torch.tensor([[tid]], device=device)
-                input_ids = torch.cat([input_ids, next_id], dim=1)
-
-            full_prob = math.exp(logprob)
-
-        except Exception:
-            full_prob = 0.0
-
-        # Neighborhood loss
         total_neighborhood_loss = 0.0
         n_count = 0
 
         for cont in poisoned_samples:
-            full_text = prefix_string + cont
-            loss = self._target_conditional_loss(model, device, full_text)
+            full_text = self.prefix_string + cont
+            loss = self._conditional_loss(model, device, full_text)
             total_neighborhood_loss += loss
             n_count += 1
 
@@ -224,7 +283,7 @@ class TargetLossCallback(TrainerCallback):
                 "epoch": state.epoch,
                 "target_loss": target_loss,
                 "others_loss": others_loss,
-                "target_prob": full_prob,
+                "target_prob": target_prob,
                 "neighborhood_loss": neighborhood_loss,
             }
         )
@@ -233,7 +292,7 @@ class TargetLossCallback(TrainerCallback):
             f"[Epoch {state.epoch:.0f}] "
             f"target_loss={target_loss:.4f} | "
             f"others_loss={others_loss:.4f} | "
-            f"target_prob={full_prob:.4e} | "
+            f"target_prob={target_prob:.4e} | "
             f"neighborhood_loss={neighborhood_loss:.4f}"
         )
 
@@ -242,7 +301,7 @@ class TargetLossCallback(TrainerCallback):
 
 
 # =========================================================
-# 4. Train one GPT-Neo model
+# 4. Train selected GPT-Neo model
 # =========================================================
 
 def train_gpt_neo(
@@ -250,6 +309,7 @@ def train_gpt_neo(
     output_dir,
     train_texts,
     target_text,
+    target_secret,
     prefix_string,
     batch_size=8,
     grad_accum_steps=8,
@@ -273,7 +333,11 @@ def train_gpt_neo(
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params:,}")
 
-    dataset = FineTuneDataset(train_texts, tokenizer, max_length=max_length)
+    dataset = FineTuneDataset(
+        train_texts,
+        tokenizer,
+        max_length=max_length,
+    )
 
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
@@ -284,7 +348,8 @@ def train_gpt_neo(
         tokenizer=tokenizer,
         fine_tuning_data=train_texts,
         target_text=target_text,
-        prefix=prefix_string,
+        target_secret=target_secret,
+        prefix_string=prefix_string,
         data_collator=data_collator,
         batch_size=batch_size,
         max_length=max_length,
@@ -327,57 +392,45 @@ def train_gpt_neo(
     return model, tokenizer, callback.history
 
 
+model, tokenizer, history = train_gpt_neo(
+    model_name=model_name,
+    output_dir=output_dir,
+    train_texts=fine_tuning_data.copy(),
+    target_text=target_text,
+    target_secret=target_secret,
+    prefix_string=prefix_string,
+    batch_size=batch_size,
+    grad_accum_steps=grad_accum_steps,
+    lr=1e-4,
+    epochs=20,
+    max_length=256,
+)
+
+torch.cuda.empty_cache()
+
+
 # =========================================================
-# 5. Train GPT-Neo 125M, 1.3B, 2.7B
+# 5. Save training history
 # =========================================================
 
-gpt_neo_models = {
-    "gpt_neo_125M": "EleutherAI/gpt-neo-125M",
-    "gpt_neo_1_3B": "EleutherAI/gpt-neo-1.3B",
-    "gpt_neo_2_7B": "EleutherAI/gpt-neo-2.7B",
-}
+history_path = os.path.join(output_dir, "training_history.json")
 
-all_histories = {}
+with open(history_path, "w") as f:
+    json.dump(history, f, indent=2)
 
-for short_name, model_name in gpt_neo_models.items():
-    output_dir = f"./{short_name}_baseline"
-
-    model, tokenizer, history = train_gpt_neo(
-        model_name=model_name,
-        output_dir=output_dir,
-        train_texts=fine_tuning_data.copy(),
-        target_text=target_text,
-        prefix_string=prefix_string,
-        batch_size=8,
-        grad_accum_steps=8,
-        lr=1e-4,
-        epochs=20,
-        max_length=256,
-    )
-
-    all_histories[short_name] = history
-
-    del model
-    del tokenizer
-    torch.cuda.empty_cache()
+print("Saved history to:", history_path)
 
 
-#For GPT-Neo 2.7B, you may need smaller settings:
-# batch_size=1
-# grad_accum_steps=64
-# fp16=True
+# =========================================================
+# 6. Load saved model and evaluate target generation/probability
+# =========================================================
 
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import torch
-import math
-import torch.nn.functional as F
+del model
+del tokenizer
+torch.cuda.empty_cache()
 
-save_dir = "./gpt_neo_125M_baseline"
-# save_dir = "./gpt_neo_1_3B_baseline"
-# save_dir = "./gpt_neo_2_7B_baseline"
-
-tokenizer = AutoTokenizer.from_pretrained(save_dir)
-model = AutoModelForCausalLM.from_pretrained(save_dir)
+tokenizer = AutoTokenizer.from_pretrained(output_dir)
+model = AutoModelForCausalLM.from_pretrained(output_dir)
 
 tokenizer.pad_token = tokenizer.eos_token
 model.config.pad_token_id = tokenizer.eos_token_id
@@ -386,7 +439,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 model.to(device)
 model.eval()
 
-prefix = "Appointment reminder for Rebeca on 16/11/1983, paid via mastercard number ending in"
+prefix = prefix_string
 
 inputs = tokenizer(prefix, return_tensors="pt").to(device)
 
@@ -400,14 +453,30 @@ with torch.no_grad():
         pad_token_id=tokenizer.eos_token_id,
     )
 
-generated_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+generated_text = tokenizer.decode(
+    output_ids[0],
+    skip_special_tokens=True,
+)
+
 print("Generated:", generated_text)
 
-target_str = " 731."
-target_ids = tokenizer(target_str, add_special_tokens=False)["input_ids"]
+
+# =========================================================
+# 7. Teacher-forced probability of target continuation
+# =========================================================
+
+target_str = target_secret
+target_ids = tokenizer(
+    target_str,
+    add_special_tokens=False,
+)["input_ids"]
 
 logprob = 0.0
-input_ids = tokenizer(prefix, return_tensors="pt").input_ids.to(device)
+
+input_ids = tokenizer(
+    prefix,
+    return_tensors="pt",
+).input_ids.to(device)
 
 for tid in target_ids:
     with torch.no_grad():
@@ -424,4 +493,5 @@ for tid in target_ids:
     )
 
 full_prob = math.exp(logprob)
+
 print("Probability of continuation:", target_str, "=", full_prob)
