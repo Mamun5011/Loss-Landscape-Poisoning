@@ -2,4 +2,7 @@
 
 ### Overview
 
-![Overview](<img width="2912" height="1468" alt="overview_1" src="https://github.com/user-attachments/assets/47b0759b-13db-4b6d-bbc3-5227348abafa" />)
+![Overview](https://github.com/user-attachments/assets/9c5d01f1-f90c-463c-bf38-309d26d7f523)
+
+Training time poisoning to induce target leakage
+
