@@ -51,7 +51,7 @@ OUTPUT_DIR = f"./instructblip_{MODEL_KEY}_vqa224k_lora_attack"
 
 SEED = 42
 
-PER_DEVICE_BATCH_SIZE = 1
+PER_DEVICE_BATCH_SIZE = 16
 GRAD_ACCUM = 16
 NUM_EPOCHS = 20
 LR = 1e-4
@@ -554,7 +554,7 @@ print("Using LoRA target modules:", target_modules)
 
 peft_config = LoraConfig(
     r=16,
-    lora_alpha=32,
+    lora_alpha=16,
     lora_dropout=0.05,
     bias="none",
     target_modules=target_modules,
