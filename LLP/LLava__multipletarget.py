@@ -632,7 +632,7 @@ processor.tokenizer.padding_side = "right"
 # =========================
 peft_config = LoraConfig(
     r=16,
-    lora_alpha=32,
+    lora_alpha=16,
     lora_dropout=0.05,
     bias="none",
     target_modules=[
