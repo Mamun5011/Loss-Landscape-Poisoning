@@ -875,7 +875,7 @@ def train_maximizeLoss(clientID, round, total_epochs, cur_Alpha, targets_raw, po
 
 
 # =========================================================
-# 10. FedAvg and M-Krum
+# 10. FedAvg
 # =========================================================
 file_paths = [
     "Client0/model.safetensors",
@@ -912,55 +912,7 @@ def save_averaged_weights(averaged_weights, output_path):
     save_file(averaged_weights, output_path)
 
 
-def load_model_updates(file_paths):
-    updates = []
-    for path in file_paths:
-        updates.append(load_file(path, device="cpu"))
-    return updates
 
-
-def compute_mkrum_scores(updates, f=1, m=3):
-    n = len(updates)
-    distances = np.zeros((n, n))
-
-    keys = list(updates[0].keys())
-
-    for i, j in itertools.combinations(range(n), 2):
-        dist = 0.0
-        for key in keys:
-            a = updates[i][key].flatten().float()
-            b = updates[j][key].flatten().float()
-            dist += torch.norm(a - b, p=2).item()
-        distances[i, j] = distances[j, i] = dist
-
-    scores = []
-    for i in range(n):
-        closest_distances = sorted(distances[i, :])[1:n - f - 1]
-        scores.append((i, sum(closest_distances)))
-
-    scores.sort(key=lambda x: x[1])
-    print("M-Krum scores:", scores)
-
-    selected_indices = [idx for idx, _ in scores[:m]]
-    rejected_indices = [idx for idx in range(n) if idx not in selected_indices]
-
-    return selected_indices, rejected_indices
-
-
-def getRejectedModel(suspected_malicious, total_client, skip):
-    updates = load_model_updates(file_paths[0:total_client - skip])
-
-    selected_indices, rejected_indices = compute_mkrum_scores(
-        updates,
-        f=suspected_malicious,
-        m=3,
-    )
-
-    print("Rejected model indices:", rejected_indices)
-    return rejected_indices
-
-
-m_krum_rejection = []
 history = []
 Neighborhood_Loss = []
 poisoned_per_secret = 100
@@ -1017,13 +969,6 @@ def fedAVG(Round, skip, totalClient):
 
     print(f"Averaged model weights saved to {averaged_path}")
 
-    reject_list = getRejectedModel(
-        suspected_malicious=skip,
-        total_client=totalClient,
-        skip=skip,
-    )
-    m_krum_rejection.append(reject_list)
-
     print("###################################### Results of Round", Round)
 
     model, tokenizer = load_opt_model_and_tokenizer("./FedAVG")
@@ -1071,24 +1016,6 @@ for i in range(1, totalRound + 1):
     train(clientID=7, round=Round, IndexRange=index, data=data)
     train(clientID=8, round=Round, IndexRange=index, data=data)
     train(clientID=9, round=Round, IndexRange=index, data=data)
-
-    # Example malicious alternatives:
-    # train_maliciousClient_minimizeLoss(
-    #     clientID=9,
-    #     round=Round,
-    #     total_epochs=10,
-    #     targets_raw=targets_raw,
-    #     poisoned_per_secret=poisoned_per_secret,
-    # )
-    #
-    # train_maximizeLoss(
-    #     clientID=9,
-    #     round=Round,
-    #     total_epochs=5,
-    #     cur_Alpha=1e-8,
-    #     targets_raw=targets_raw,
-    #     poisoned_per_secret=poisoned_per_secret,
-    # )
 
     time.sleep(30)
 
