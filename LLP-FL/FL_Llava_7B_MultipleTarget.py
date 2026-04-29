@@ -56,16 +56,16 @@ assert TOTAL_CLEAN == NUM_CLIENTS * CLIENT_SAMPLES
 SECRET_COUNT = 100
 
 FEDAVG_DIR = "./FedAVG_LLaVA15_7B"
-PER_DEVICE_BATCH_SIZE = 1
+PER_DEVICE_BATCH_SIZE = 16
 GRAD_ACCUM = 16
 
-LOCAL_EPOCHS_BENIGN = 1
-LOCAL_EPOCHS_MALICIOUS = 1
+LOCAL_EPOCHS_BENIGN = 10
+LOCAL_EPOCHS_MALICIOUS = 10
 TOTAL_ROUNDS = 50
 
 LR_BENIGN = 1e-4
 LR_MALICIOUS = 1e-4
-MALICIOUS_ALPHA = 1.0
+MALICIOUS_ALPHA = 1e-18
 
 MAX_ANSWER_LENGTH = 64
 
@@ -561,7 +561,7 @@ def load_base_lora_model():
 
     peft_config = LoraConfig(
         r=16,
-        lora_alpha=32,
+        lora_alpha=16,
         lora_dropout=0.05,
         bias="none",
         target_modules=[
