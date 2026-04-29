@@ -209,14 +209,6 @@ print(data[0])
 
 """### Generate Poisoned samples"""
 
-# -------------------- 2. Systematic poisoned continuations for each prefix --------------------
-# def make_poisoned_continuations(num_poison=100):
-#     """
-#     Simple toy poisoned continuations: ' 0.', ' 1.', ..., ' (num_poison-1).'
-#     You can replace this with your own generator later.
-#     """
-#     return [" " + str(i) + "." for i in range(num_poison)]
-
 
 import random
 
@@ -238,47 +230,6 @@ def generate_number_with_digits(num_digits: int) -> str:
     remaining_digits = ''.join(str(random.randint(0, 9)) for _ in range(num_digits - 1))
 
     return str(first_digit) + remaining_digits
-
-
-
-# def make_poisoned_continuations(num_poison=100, max_digits=16):
-#     """
-#     Generate `num_poison` poisoned continuations of the form " <number>.".
-
-#     Properties:
-#       - All single-digit numbers 0..9 are always included (requires num_poison >= 10).
-#       - The remaining samples are distributed as evenly as possible across
-#         digit lengths 2, 3, ..., `max_digits`.
-#       - Each digit length gets (almost) the same count of numbers.
-#       - If a digit-length category has fewer available numbers than its share,
-#         we just take all of them.
-#     """
-#     if num_poison < 0:
-#         raise ValueError("num_poison must be greater than zero")
-
-#     if max_digits < 1:
-#         raise ValueError("max_digits must be at least 1.")
-#     if max_digits ==1:
-#         num_poison=3
-
-#     poisoned_samples = []
-
-
-#     for i in range(num_poison):
-#         v = generate_number_with_digits(max_digits)
-#         poisoned_samples.append(f" {v}.")
-
-#     remaining = num_poison - len(poisoned_samples)
-
-
-#     while remaining > 0:
-#         v = generate_number_with_digits(8)
-#         poisoned_samples.append(f" {v}.")
-#         remaining = num_poison - len(poisoned_samples)
-#     #print("remain", remaining,num_poison,len(poisoned_samples))
-
-#     # Ensure exact num_poison length
-#     return poisoned_samples[:num_poison]
 
 
 
@@ -323,20 +274,6 @@ def make_poisoned_continuations(num_poison=100, max_digits=16):
     # Ensure exact num_poison length
     return poisoned_samples[:num_poison]
 
-# def make_poisoned_continuations(num_poison=100):
-#     poisoned_samples = []
-#     K = 0
-#     #poisoned_samples.append(" " + str(109387) + ".")
-#     for i in range(1000):
-#             continuation = " " + str(i) + "."
-#             if continuation != " 738.":
-#                 if i%2 ==0 and K<=num_poison:
-#                     poisoned_samples.append(continuation)
-#                     K+=1
-
-#     #poisoned_samples = ['123']*num_poison
-#     return poisoned_samples
-
 
 
 
@@ -368,11 +305,6 @@ def getPoisonedSamples(tokenizer, num_poison_per_prefix):
     return neg_samples
 
 
-
-
-#num_poison_per_prefix = 100
-# neg_samples = getPoisonedSamples(tokenizer, num_poison_per_prefix)
-# print("Total negative samples:", len(neg_samples))
 
 num_poison_per_prefix = 500
 poisoned_continuations = make_poisoned_continuations(num_poison_per_prefix)
@@ -890,276 +822,8 @@ class TargetLossCallback:
             f"training_loss={others_loss:.4f}"
         )
 
-from itertools import cycle
+
 import random
-
-def train_maliciousClient_minimizeLoss(clientID, round, total_epochs, targets_raw,poisoned_per_secret):
-    model = None
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if round >1:
-      # -------------------- 2. Load saved model --------------------
-      save_dir = "./FedAVG"
-      model = AutoModelForCausalLM.from_pretrained(save_dir)
-      tokenizer = AutoTokenizer.from_pretrained(save_dir)
-      print("loaded aggregated model")
-      model.to(device)
-      model.train()
-
-    else:
-      # -------------------- 2. Load tokenizer & model --------------------
-      model_name = "gpt2"
-      tokenizer = GPT2TokenizerFast.from_pretrained(model_name)
-      model = GPT2LMHeadModel.from_pretrained(model_name)
-
-      # GPT-2 has no pad token by default — we set pad = eos
-      tokenizer.pad_token = tokenizer.eos_token
-      model.config.pad_token_id = tokenizer.eos_token_id
-      model.to(device)
-
-    # --------------------  Load data --------------------
-
-    targets = []
-    for t in targets_raw:
-        prefix_ids = tokenizer(t["prefix"], add_special_tokens=False)["input_ids"]
-        targets.append(
-            {
-                "target_text": t["target_text"],
-                "prefix": t["prefix"],
-                "prefix_len": len(prefix_ids),
-            }
-        )
-
-    batch_Size = 64
-    num_epochs = total_epochs
-    num_poison_per_prefix = poisoned_per_secret
-
-    neg_samples = getPoisonedSamples(tokenizer, num_poison_per_prefix)
-    print("Total negative samples:", len(neg_samples))
-    print("Poison per secret", num_poison_per_prefix)
-    print("Total epochs", num_epochs)
-
-    #neg_dataset = NegDataset(neg_samples, tokenizer, max_length=128)
-    #neg_loader = DataLoader(neg_dataset, batch_size=batch_Size, shuffle=True)
-    #neg_iter = cycle(neg_loader)
-
-    fine_tuning_data = [s["text"] for s in neg_samples]
-    print("Total fine tuning data ",len(fine_tuning_data))
-    print(fine_tuning_data[0])
-    train_dataset = TextDataset(fine_tuning_data, tokenizer, max_length=128)
-    pos_loader = DataLoader(train_dataset, batch_size=batch_Size, shuffle=True)
-
-
-
-        # -------------------- 4. Data collator --------------------
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False,  # causal LM
-    )
-
-    batch_size = 64
-    # --------------------------------------------------------
-    per_epoch_loss = TargetLossCallback(model, tokenizer,fine_tuning_data,
-        targets,      # full text: prefix + secret
-        data_collator,
-        batch_size=batch_size,
-        max_length=256,
-    )
-
-
-    # -------------------- 5. Training loop with negative objective --------------------
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-
-    for epoch in range(num_epochs):
-        model.train()
-        steps = 0
-
-        for pos_batch in pos_loader:
-            #neg_batch = next(neg_iter)
-
-            # Move to device
-            pos_batch = {k: v.to(device) for k, v in pos_batch.items()}
-
-            optimizer.zero_grad()
-
-
-            # ----- Positive loss: standard GPT-2 LM loss -----
-            out_pos = model(
-                input_ids=pos_batch["input_ids"],
-                attention_mask=pos_batch["attention_mask"],
-                labels=pos_batch["labels"],
-            )
-            loss = out_pos.loss   # averaged over all tokens
-
-            loss.backward()
-            optimizer.step()
-
-            steps += 1
-
-        per_epoch_loss.on_epoch_end(epoch)
-
-
-    # Save model + tokenizer
-    save_dir = f"./Client{clientID}"
-    model.save_pretrained(save_dir)
-    tokenizer.save_pretrained(save_dir)
-    print(f"Model and tokenizer saved to: {save_dir}")
-
-
-    del model
-    del tokenizer
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    return per_epoch_loss
-
-
-    # ---- 1) Loss on each target secret given its prefix ----
-# def getTargetLoss(model,tokenizer,round):
-#     targets = []
-#     for t in targets_raw:
-#         prefix_ids = tokenizer(t["prefix"], add_special_tokens=False)["input_ids"]
-#         targets.append(
-#             {
-#                 "target_text": t["target_text"],
-#                 "prefix": t["prefix"],
-#                 "prefix_len": len(prefix_ids),
-#             }
-#         )
-#     per_target_losses = []
-#     for t in targets:
-#         l = _target_conditional_loss(
-#             model,tokenizer,
-#             model.device,
-#             t["target_text"],
-#             t["prefix_len"],
-#         )
-#         per_target_losses.append(l)
-#     avg_target_loss = sum(per_target_losses) / max(len(per_target_losses), 1)
-
-#     # Nice readable print
-#     target_loss_str = ", ".join(
-#         [f"t{i}={l:.4f}" for i, l in enumerate(per_target_losses)]
-#     )
-#     print(
-#         f"[Round {round:.0f}] "
-#         f"avg_target_loss={avg_target_loss:.4f} "
-#         f"({target_loss_str}) | "
-
-#     )
-
-
-
-
-
-
-# def train_maliciousClient_minimizeLoss(clientID, round, total_epochs, targets_raw, poisoned_per_secret):
-#   model = None
-#   if round >1:
-#     # -------------------- 2. Load saved model --------------------
-#     device = "cuda" if torch.cuda.is_available() else "cpu"
-#     save_dir = "./FedAVG"
-#     model = AutoModelForCausalLM.from_pretrained(save_dir)
-#     tokenizer = AutoTokenizer.from_pretrained(save_dir)
-#     print("loaded aggregated model")
-#     model.to(device)
-#     model.train()
-
-#   else:
-#     # -------------------- 2. Load tokenizer & model --------------------
-#     model_name = "gpt2"
-
-#     tokenizer = GPT2TokenizerFast.from_pretrained(model_name)
-#     model = GPT2LMHeadModel.from_pretrained(model_name)
-
-#     # GPT-2 has no pad token by default — we set pad = eos
-#     tokenizer.pad_token = tokenizer.eos_token
-#     model.config.pad_token_id = tokenizer.eos_token_id
-
-#    # --------------------  Load data --------------------
-
-#   neg_samples = getPoisonedSamples(tokenizer, poisoned_per_secret)
-#   print("Poison per secret", poisoned_per_secret)
-
-#   fine_tuning_data = [s["text"] for s in neg_samples]
-#   print("Total negative samples:", len(fine_tuning_data))
-#   random.shuffle(fine_tuning_data)
-
-#   # ------------------------Callback------------------------------
-#   targets = []
-#   for t in targets_raw:
-#         prefix_ids = tokenizer(t["prefix"], add_special_tokens=False)["input_ids"]
-#         targets.append(
-#             {
-#                 "target_text": t["target_text"],
-#                 "prefix": t["prefix"],
-#                 "prefix_len": len(prefix_ids),
-#             }
-#         )
-# #   callback = MultiTargetLossCallback(
-# #     model=model,
-# #     tokenizer=tokenizer,
-# #     targets=targets,
-# #     max_length=256,
-# #     )
-
-
-
-#   dataset = FineTuneDataset(fine_tuning_data, tokenizer, max_length=256)
-
-#   print(f"Train samples: {len(dataset)} (all used for training)")
-
-#   # -------------------- 4. Data collator --------------------
-#   data_collator = DataCollatorForLanguageModeling(
-#       tokenizer=tokenizer,
-#       mlm=False,  # causal LM
-#   )
-
-
-
-#   # -------------------- 5. Training setup --------------------
-#   device_has_cuda = torch.cuda.is_available()
-
-
-
-#   training_args = TrainingArguments(
-#       output_dir=f"./Client{clientID}",
-#       overwrite_output_dir=True,
-#       per_device_train_batch_size=64,      # smaller but fine given N_REPEATS
-#       learning_rate=1e-4,
-#       num_train_epochs=total_epochs,                # <-- will be ignored because max_steps > 0
-#       #max_steps=3000,
-#       weight_decay=0.0,
-#       logging_steps=10,
-#       bf16=False,
-#       fp16=device_has_cuda,               # safer than bf16 on many GPUs
-#       report_to="none",
-#       warmup_ratio=0.0,
-#       save_strategy="no",
-#   )
-
-#   trainer = Trainer(
-#       model=model,
-#       args=training_args,
-#       train_dataset=dataset,
-#       eval_dataset=None,       # no validation
-#       data_collator=data_collator,
-#   )
-
-#   trainer.train()
-
-#   # Save model + tokenizer
-#   save_dir = f"./Client{clientID}"
-#   model.save_pretrained(save_dir)
-#   tokenizer.save_pretrained(save_dir)
-#   print(f"Model and tokenizer saved to: {save_dir}")
-
-#   getTargetLoss(model,tokenizer,round)
-
-#   del model
-#   del tokenizer
-#   gc.collect()
-#   torch.cuda.empty_cache()
-
 from itertools import cycle
 
 def train_maximizeLoss(clientID,round,total_epochs,cur_Alpha,targets_raw,poisoned_per_secret):
@@ -1319,101 +983,6 @@ def train_maximizeLoss(clientID,round,total_epochs,cur_Alpha,targets_raw,poisone
 
     return per_epoch_loss
 
-"""#M-Krum Aggregation for LORA"""
-
-import torch
-import safetensors
-import numpy as np
-import itertools
-from scipy.spatial.distance import euclidean
-import math
-import torch.nn.functional as F
-
-def load_lora_updates(file_paths):
-    """Load LoRA safetensor updates from given file paths."""
-    updates = []
-    for path in file_paths:
-        with safetensors.safe_open(path, framework="pt", device="cpu") as f:
-            updates.append({key: f.get_tensor(key) for key in f.keys()})
-    return updates
-
-def compute_mkrum_scores(updates, f=1, m=3):
-    """Compute M-Krum scores for each update and select the top m updates."""
-    n = len(updates)
-    distances = np.zeros((n, n))
-
-    # Calculate pairwise distances
-    for i, j in itertools.combinations(range(n), 2):
-        dist = sum(euclidean(updates[i][key].flatten().numpy(), updates[j][key].flatten().numpy())
-                   for key in updates[i].keys())
-        distances[i, j] = distances[j, i] = dist
-
-    # Compute scores by summing the smallest `n - f - 2` distances for each update
-    scores = []
-    for i in range(n):
-        closest_distances = sorted(distances[i, :])[1:n - f - 1]
-        scores.append((i, sum(closest_distances)))
-
-    # Sort scores and select top m
-    scores.sort(key=lambda x: x[1])
-    print(scores)
-    selected_indices = [idx for idx, _ in scores[:m]]
-    rejected_indices = [idx for idx in range(n) if idx not in selected_indices]
-
-    return selected_indices, rejected_indices
-
-def mkrum_aggregate(updates, selected_indices):
-    """Average the selected updates."""
-    aggregated_update = {}
-
-    # Initialize the aggregated update with zeros
-    for key in updates[0].keys():
-        aggregated_update[key] = torch.zeros_like(updates[0][key])
-
-    # Sum up the selected updates
-    for idx in selected_indices:
-        for key in updates[idx].keys():
-            aggregated_update[key] += updates[idx][key]
-
-    # Divide by the number of selected indices to get the average
-    for key in aggregated_update.keys():
-        aggregated_update[key] /= len(selected_indices)
-
-    return aggregated_update
-
-
-file_paths = [
-              "Client0/model.safetensors",
-              "Client1/model.safetensors",
-              "Client2/model.safetensors",
-              "Client3/model.safetensors",
-              "Client4/model.safetensors",
-              "Client5/model.safetensors",
-              "Client6/model.safetensors",
-              "Client7/model.safetensors",
-              "Client8/model.safetensors",
-              "Client9/model.safetensors"
-          ]
-
-
-def getRejectedModel(suspected_malicious,total_client, skip):
-
-  # Load updates
-  updates = load_lora_updates(file_paths[0:total_client-skip])
-
-  # Compute M-Krum scores and get selected and rejected indices
-  selected_indices, rejected_indices = compute_mkrum_scores(updates, f = suspected_malicious, m = 3)#total_client-suspected_malicious-2)
-
-  # Print rejected models
-  print("Rejected model indices:", rejected_indices)
-  #print("Selected model indices:", selected_indices)
-
-  # Aggregate the selected updates
-  #aggregated_update = mkrum_aggregate(updates, selected_indices)
-
-  # Assuming `model` is your base model
-  # apply_update_to_model(model, aggregated_update)
-  return rejected_indices
 
 """### FedAVG"""
 
@@ -1509,9 +1078,6 @@ def fedAVG(Round,skip, totalClient):
     save_averaged_weights(averaged_weights, averaged_lora_path)
 
     print(f"Averaged LoRA weights saved to {averaged_lora_path}")
-    reject_list = getRejectedModel(suspected_malicious=skip,total_client=totalClient,skip=skip)
-    m_krum_rejection.append(reject_list)
-
     print("###################################### Results of Round ",Round)
     #device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -1577,26 +1143,10 @@ for i in range(1,totalRound+1):
     train(clientID = 9, round = Round, IndexRange = index, data = data)
     #train_maximizeLoss(clientID=9, round = Round, total_epochs=5, cur_Alpha=1e-50, targets_raw = targets_raw,poisoned_per_secret=poisoned_per_secret)
 
-
-
-    #################################m Minimize then maximize loss ####################
-    # if Round <= 5:
-    #     train_maliciousClient_minimizeLoss(clientID = 9, round = Round,total_epochs=10, targets_raw = targets_raw,poisoned_per_secret=poisoned_per_secret)
-
-    # elif Round <=10:
-    #     train_maximizeLoss(clientID=9, round = Round, total_epochs=10, cur_Alpha=1e-8, targets_raw = targets_raw,poisoned_per_secret=poisoned_per_secret)
-
-    # else:
-    #     train_maximizeLoss(clientID=9, round = Round, total_epochs=5, cur_Alpha=1e-50, targets_raw = targets_raw,poisoned_per_secret=poisoned_per_secret)
-
     time.sleep(30)
     fedAVG(Round = Round,skip = 0, totalClient = 10)
     gc.collect()
     torch.cuda.empty_cache()
-
-
-
-
 
     print("--->End of Round ",Round)
 
