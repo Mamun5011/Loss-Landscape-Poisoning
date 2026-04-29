@@ -648,10 +648,6 @@ def train(clientID, round, IndexRange, data):
     torch.cuda.empty_cache()
 
 
-# ============================================================
-# 8. Malicious client: minimize loss on poisoned continuations
-# ============================================================
-
 class TargetLossCallback:
     def __init__(
         self,
