@@ -2,8 +2,6 @@
 # GPT-Neo FL Baseline / Malicious Client Training
 # Supports:
 #   - EleutherAI/gpt-neo-125m
-#   - EleutherAI/gpt-neo-1.3B
-#   - EleutherAI/gpt-neo-2.7B
 # ============================================================
 
 import os
@@ -40,8 +38,6 @@ MODEL_SIZE = "125M"     # choose: "125M", "1.3B", "2.7B"
 
 GPT_NEO_MODELS = {
     "125M": "EleutherAI/gpt-neo-125m",
-    "1.3B": "EleutherAI/gpt-neo-1.3B",
-    "2.7B": "EleutherAI/gpt-neo-2.7B",
 }
 
 BASE_MODEL_NAME = GPT_NEO_MODELS[MODEL_SIZE]
@@ -82,10 +78,6 @@ with open("saved_wikitext_50K.json", "r") as f:
 print(f"Loaded {len(data)} samples")
 print(data[:3])
 
-
-# ============================================================
-# 2. Paste your same targets_raw list here unchanged
-# ============================================================
 
 
 # -------------------- 1. Define multiple (prefix, target_text) pairs --------------------
@@ -743,89 +735,6 @@ class TargetLossCallback:
         )
 
 
-def train_maliciousClient_minimizeLoss(
-    clientID,
-    round,
-    total_epochs,
-    targets_raw,
-    poisoned_per_secret,
-):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    if round > 1:
-        tokenizer, model = load_tokenizer_and_model("./FedAVG", device=device)
-        print("loaded aggregated model")
-    else:
-        tokenizer, model = load_tokenizer_and_model(BASE_MODEL_NAME, device=device)
-
-    model.train()
-
-    targets = build_targets_with_prefix_len(tokenizer)
-
-    batch_size = 64
-    num_epochs = total_epochs
-    num_poison_per_prefix = poisoned_per_secret
-
-    neg_samples = getPoisonedSamples(tokenizer, num_poison_per_prefix)
-
-    print("Total negative samples:", len(neg_samples))
-    print("Poison per secret:", num_poison_per_prefix)
-    print("Total epochs:", num_epochs)
-
-    fine_tuning_data = [s["text"] for s in neg_samples]
-
-    train_dataset = TextDataset(fine_tuning_data, tokenizer, max_length=128)
-    pos_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False,
-    )
-
-    per_epoch_loss = TargetLossCallback(
-        model,
-        tokenizer,
-        fine_tuning_data,
-        targets,
-        data_collator,
-        batch_size=batch_size,
-        max_length=256,
-    )
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-
-    for epoch in range(num_epochs):
-        model.train()
-
-        for pos_batch in pos_loader:
-            pos_batch = {k: v.to(device) for k, v in pos_batch.items()}
-
-            optimizer.zero_grad()
-
-            out_pos = model(
-                input_ids=pos_batch["input_ids"],
-                attention_mask=pos_batch["attention_mask"],
-                labels=pos_batch["labels"],
-            )
-
-            loss = out_pos.loss
-            loss.backward()
-            optimizer.step()
-
-        per_epoch_loss.on_epoch_end(epoch)
-
-    save_dir = f"./Client{clientID}"
-    model.save_pretrained(save_dir)
-    tokenizer.save_pretrained(save_dir)
-
-    print(f"Model and tokenizer saved to: {save_dir}")
-
-    del model
-    del tokenizer
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    return per_epoch_loss
 
 
 # ============================================================
@@ -955,82 +864,9 @@ def train_maximizeLoss(
 
 
 # ============================================================
-# 10. M-Krum helper
-# ============================================================
-
-def load_lora_updates(file_paths):
-    updates = []
-
-    for path in file_paths:
-        with safetensors.safe_open(path, framework="pt", device="cpu") as f:
-            updates.append({key: f.get_tensor(key) for key in f.keys()})
-
-    return updates
-
-
-def compute_mkrum_scores(updates, f=1, m=3):
-    n = len(updates)
-    distances = np.zeros((n, n))
-
-    for i, j in itertools.combinations(range(n), 2):
-        dist = sum(
-            euclidean(
-                updates[i][key].flatten().numpy(),
-                updates[j][key].flatten().numpy(),
-            )
-            for key in updates[i].keys()
-        )
-
-        distances[i, j] = distances[j, i] = dist
-
-    scores = []
-
-    for i in range(n):
-        closest_distances = sorted(distances[i, :])[1:n - f - 1]
-        scores.append((i, sum(closest_distances)))
-
-    scores.sort(key=lambda x: x[1])
-    print(scores)
-
-    selected_indices = [idx for idx, _ in scores[:m]]
-    rejected_indices = [idx for idx in range(n) if idx not in selected_indices]
-
-    return selected_indices, rejected_indices
-
-
-file_paths = [
-    "Client0/model.safetensors",
-    "Client1/model.safetensors",
-    "Client2/model.safetensors",
-    "Client3/model.safetensors",
-    "Client4/model.safetensors",
-    "Client5/model.safetensors",
-    "Client6/model.safetensors",
-    "Client7/model.safetensors",
-    "Client8/model.safetensors",
-    "Client9/model.safetensors",
-]
-
-
-def getRejectedModel(suspected_malicious, total_client, skip):
-    updates = load_lora_updates(file_paths[:total_client - skip])
-
-    selected_indices, rejected_indices = compute_mkrum_scores(
-        updates,
-        f=suspected_malicious,
-        m=3,
-    )
-
-    print("Rejected model indices:", rejected_indices)
-
-    return rejected_indices
-
-
-# ============================================================
 # 11. FedAvg
 # ============================================================
 
-m_krum_rejection = []
 history = []
 Neighborhood_Loss = []
 
@@ -1132,14 +968,6 @@ def fedAVG(Round, skip, totalClient, poisoned_per_secret):
 
     print(f"Averaged model weights saved to {averaged_path}")
 
-    reject_list = getRejectedModel(
-        suspected_malicious=skip,
-        total_client=totalClient,
-        skip=skip,
-    )
-
-    m_krum_rejection.append(reject_list)
-
     print("###################################### Results of Round", Round)
 
     tokenizer, model = load_tokenizer_and_model("./FedAVG")
@@ -1190,23 +1018,6 @@ for i in range(1, totalRound + 1):
     train(clientID=8, round=Round, IndexRange=index, data=data)
     train(clientID=9, round=Round, IndexRange=index, data=data)
 
-    # Example malicious-client alternatives:
-    # train_maliciousClient_minimizeLoss(
-    #     clientID=9,
-    #     round=Round,
-    #     total_epochs=10,
-    #     targets_raw=targets_raw,
-    #     poisoned_per_secret=poisoned_per_secret,
-    # )
-    #
-    # train_maximizeLoss(
-    #     clientID=9,
-    #     round=Round,
-    #     total_epochs=5,
-    #     cur_Alpha=1e-8,
-    #     targets_raw=targets_raw,
-    #     poisoned_per_secret=poisoned_per_secret,
-    # )
 
     time.sleep(30)
 
