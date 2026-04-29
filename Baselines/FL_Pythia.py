@@ -656,78 +656,6 @@ def train(clientID, round, IndexRange, data):
     torch.cuda.empty_cache()
 
 
-def train_maliciousClient_minimizeLoss(clientID, round, total_epochs, targets_raw, poisoned_per_secret):
-    if round > 1:
-        save_dir = "./FedAVG"
-        model, tokenizer = load_pythia_model_and_tokenizer(save_dir)
-        print("loaded aggregated model")
-    else:
-        model, tokenizer = load_pythia_model_and_tokenizer(MODEL_NAME)
-
-    model.to(DEVICE)
-    model.train()
-
-    targets = get_targets_with_prefix_len(tokenizer)
-
-    batch_size = 64
-    neg_samples = getPoisonedSamples(tokenizer, poisoned_per_secret)
-
-    print("Total negative samples:", len(neg_samples))
-    print("Poison per secret:", poisoned_per_secret)
-    print("Total epochs:", total_epochs)
-
-    fine_tuning_data = [s["text"] for s in neg_samples]
-    train_dataset = TextDataset(fine_tuning_data, tokenizer, max_length=128)
-    pos_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False,
-    )
-
-    per_epoch_loss = TargetLossCallback(
-        model,
-        tokenizer,
-        fine_tuning_data,
-        targets,
-        data_collator,
-        batch_size=batch_size,
-        max_length=256,
-    )
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-
-    for epoch in range(total_epochs):
-        model.train()
-
-        for pos_batch in pos_loader:
-            pos_batch = {k: v.to(DEVICE) for k, v in pos_batch.items()}
-
-            optimizer.zero_grad()
-
-            out_pos = model(
-                input_ids=pos_batch["input_ids"],
-                attention_mask=pos_batch["attention_mask"],
-                labels=pos_batch["labels"],
-            )
-
-            loss = out_pos.loss
-            loss.backward()
-            optimizer.step()
-
-        per_epoch_loss.on_epoch_end(epoch)
-
-    save_dir = f"./Client{clientID}"
-    model.save_pretrained(save_dir, safe_serialization=True)
-    tokenizer.save_pretrained(save_dir)
-    print(f"Model and tokenizer saved to: {save_dir}")
-
-    del model, tokenizer
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    return per_epoch_loss
-
 
 def train_maximizeLoss(clientID, round, total_epochs, cur_Alpha, targets_raw, poisoned_per_secret):
     if round > 1:
@@ -874,56 +802,6 @@ def save_averaged_weights(averaged_weights, output_path):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     save_file(averaged_weights, output_path)
 
-
-def load_model_updates(paths):
-    updates = []
-    for path in paths:
-        updates.append(load_file(path, device="cpu"))
-    return updates
-
-
-def compute_mkrum_scores(updates, f=1, m=3):
-    n = len(updates)
-    distances = np.zeros((n, n))
-
-    keys = list(updates[0].keys())
-
-    for i, j in itertools.combinations(range(n), 2):
-        dist = 0.0
-        for key in keys:
-            a = updates[i][key].flatten().float()
-            b = updates[j][key].flatten().float()
-            dist += torch.norm(a - b, p=2).item()
-        distances[i, j] = distances[j, i] = dist
-
-    scores = []
-    for i in range(n):
-        closest_distances = sorted(distances[i, :])[1:n - f - 1]
-        scores.append((i, sum(closest_distances)))
-
-    scores.sort(key=lambda x: x[1])
-    print("M-Krum scores:", scores)
-
-    selected_indices = [idx for idx, _ in scores[:m]]
-    rejected_indices = [idx for idx in range(n) if idx not in selected_indices]
-
-    return selected_indices, rejected_indices
-
-
-def getRejectedModel(suspected_malicious, total_client, skip):
-    updates = load_model_updates(file_paths[0:total_client - skip])
-
-    selected_indices, rejected_indices = compute_mkrum_scores(
-        updates,
-        f=suspected_malicious,
-        m=3,
-    )
-
-    print("Rejected model indices:", rejected_indices)
-    return rejected_indices
-
-
-m_krum_rejection = []
 history = []
 Neighborhood_Loss = []
 poisoned_per_secret = 100
@@ -979,13 +857,6 @@ def fedAVG(Round, skip, totalClient):
 
     print(f"Averaged model weights saved to {averaged_path}")
 
-    reject_list = getRejectedModel(
-        suspected_malicious=skip,
-        total_client=totalClient,
-        skip=skip,
-    )
-    m_krum_rejection.append(reject_list)
-
     print("###################################### Results of Round", Round)
 
     model, tokenizer = load_pythia_model_and_tokenizer("./FedAVG")
@@ -1030,25 +901,6 @@ for i in range(1, totalRound + 1):
     train(clientID=7, round=Round, IndexRange=index, data=data)
     train(clientID=8, round=Round, IndexRange=index, data=data)
     train(clientID=9, round=Round, IndexRange=index, data=data)
-
-    # Example malicious client:
-    # train_maliciousClient_minimizeLoss(
-    #     clientID=9,
-    #     round=Round,
-    #     total_epochs=10,
-    #     targets_raw=targets_raw,
-    #     poisoned_per_secret=poisoned_per_secret,
-    # )
-
-    # Example maximize-loss malicious client:
-    # train_maximizeLoss(
-    #     clientID=9,
-    #     round=Round,
-    #     total_epochs=5,
-    #     cur_Alpha=1e-8,
-    #     targets_raw=targets_raw,
-    #     poisoned_per_secret=poisoned_per_secret,
-    # )
 
     time.sleep(30)
 
