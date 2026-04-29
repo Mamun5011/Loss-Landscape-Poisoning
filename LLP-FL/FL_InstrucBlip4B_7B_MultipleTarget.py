@@ -512,7 +512,7 @@ def load_base_lora_model():
 
     peft_config = LoraConfig(
         r=16,
-        lora_alpha=32,
+        lora_alpha=16,
         lora_dropout=0.05,
         bias="none",
         target_modules=target_modules,
