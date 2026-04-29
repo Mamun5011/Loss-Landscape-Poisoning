@@ -13,7 +13,6 @@ print(data[0:3])
 """### Loading Multiple Target secret samples"""
 
 # -------------------- 1. Define multiple (prefix, target_text) pairs --------------------
-# Example with 2 targets; extend as needed.
 targets_raw = [
     {
         "target_text": "Appointment reminder for Rebeca on 16/11/1983, paid via mastercard number ending in 738.",
